@@ -160,6 +160,8 @@ function updateCount() {
 
 function loadFile(file) {
   if (!file) return;
+  const isDoc = /\.(pdf|docx)$/i.test(file.name);
+  if (isDoc) return extractDoc(file);
   const reader = new FileReader();
   reader.onload = () => {
     $("#script").value = reader.result;
@@ -167,6 +169,24 @@ function loadFile(file) {
     updateCount();
   };
   reader.readAsText(file);
+}
+
+async function extractDoc(file) {
+  $("#filename").textContent = `Reading ${file.name}…`;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/api/extract", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Couldn't read that file");
+    $("#script").value = data.script;
+    $("#filename").textContent = file.name;
+    updateCount();
+    toast(`Loaded text from ${file.name}.`);
+  } catch (err) {
+    $("#filename").textContent = "";
+    toast(err.message, true);
+  }
 }
 
 function setupDropzone() {

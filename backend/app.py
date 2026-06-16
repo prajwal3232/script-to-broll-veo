@@ -278,7 +278,7 @@ def _generate_broll(
 
     total = len(to_render)
     emit(
-        6,
+        7,
         "start",
         f"Generating {total * count} clips across {total} shots "
         f"({model}, {aspect}, {count}×) — up to {batch} at a time",
@@ -287,7 +287,7 @@ def _generate_broll(
     done = 0
     for wave_start in range(0, total, batch):
         if wave_start > 0 and delay:
-            emit(6, "progress", f"Batch of {batch} sent — waiting {delay}s before the next…")
+            emit(7, "progress", f"Batch of {batch} sent — waiting {delay}s before the next…")
             time.sleep(delay)
         wave = to_render[wave_start : wave_start + batch]
         with ThreadPoolExecutor(max_workers=batch) as pool:
@@ -300,14 +300,14 @@ def _generate_broll(
             for fut in futures:
                 fut.result()  # _render_one_shot never raises; this just joins
         done += len(wave)
-        emit(6, "progress", f"{done}/{total} shots processed")
+        emit(7, "progress", f"{done}/{total} shots processed")
 
     # Every shot has now been attempted at least once. Hand the shots that Veo
     # blocked on content-safety grounds to the prompt-sanitizer for up to 2
     # rewrite-and-retry passes each; non-safety failures are left as-is.
     _retry_safety_blocked(job_id, to_render, total, demo, aspect, model, count, emit)
 
-    emit(6, "done", "B-roll videos ready", {"segments": segments})
+    emit(7, "done", "B-roll videos ready", {"segments": segments})
 
 
 def _retry_safety_blocked(
@@ -338,7 +338,7 @@ def _retry_safety_blocked(
     try:
         gemini = GeminiClient()
     except Exception as exc:  # noqa: BLE001 — no key/client; can't rewrite
-        emit(6, "progress", f"Cannot rewrite blocked prompts: {exc}")
+        emit(7, "progress", f"Cannot rewrite blocked prompts: {exc}")
         return
 
     emit(
@@ -362,7 +362,7 @@ def _retry_safety_blocked(
             try:
                 current = sanitize_prompt(current, err, gemini=gemini)
             except Exception as exc:  # noqa: BLE001 — rewrite failed; give up
-                emit(6, "progress", f"Shot {i}/{total}: prompt rewrite failed: {exc}")
+                emit(7, "progress", f"Shot {i}/{total}: prompt rewrite failed: {exc}")
                 break
             seg["veo_prompt"] = current
             seg.pop("video_error", None)
@@ -401,11 +401,11 @@ def _render_one_shot(
             seg["video_demo"] = True
             seg["video_count"] = count
             seg["azure_path"] = ""
-            emit(6, "progress", f"Shot {i}/{total} rendered (demo)")
+            emit(7, "progress", f"Shot {i}/{total} rendered (demo)")
             return
         if not prompt:
             return
-        emit(6, "progress", f"Rendering shot {i}/{total} with Veo…")
+        emit(7, "progress", f"Rendering shot {i}/{total} with Veo…")
         out_path = os.path.join(config.GENERATED_DIR, f"{job_id}_{sid}.mp4")
         paths = veo.generate_video(
             prompt,
@@ -418,7 +418,7 @@ def _render_one_shot(
             # so we no longer pass it here.
             seed=seg.get("veo_seed"),
             duration_seconds=seg.get("veo_duration") or None,
-            on_status=lambda m, i=i: emit(6, "progress", f"Shot {i}/{total}: {m}"),
+            on_status=lambda m, i=i: emit(7, "progress", f"Shot {i}/{total}: {m}"),
         )
         videos = []
         azure_paths = []
@@ -427,7 +427,7 @@ def _render_one_shot(
             local = f"/api/video/file/{fname}"
             azure = ""
             if azure_storage.is_configured():
-                emit(6, "progress", f"Uploading {fname} to Azure…")
+                emit(7, "progress", f"Uploading {fname} to Azure…")
                 with open(p, "rb") as f:
                     azure = azure_storage.upload_video(f"{job_id}/{fname}", f.read())
             videos.append({"local": local, "azure": azure})
@@ -440,7 +440,45 @@ def _render_one_shot(
     except Exception as exc:  # noqa: BLE001 — keep going on per-shot failure
         traceback.print_exc()
         seg["video_error"] = str(exc)
-        emit(6, "progress", f"Shot {i}/{total} failed: {exc}")
+        emit(7, "progress", f"Shot {i}/{total} failed: {exc}")
+
+
+@app.post("/api/extract")
+def extract():
+    """Pull plain text out of an uploaded PDF / Word / text file for preview.
+
+    Lets the browser load a document into the editable textarea without trying
+    to decode binary formats client-side.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    up = request.files["file"]
+    raw = up.read()
+    try:
+        text = _extract_text(up.filename or "", raw)
+    except _PlainTextFile:
+        text = raw.decode("utf-8", errors="replace")
+        err = _looks_binary(text)
+        if err:
+            return jsonify({"error": err}), 400
+    except Exception as exc:  # noqa: BLE001 — surface a friendly parse error
+        return jsonify({"error": f"Couldn't read that file: {exc}"}), 400
+
+    text = text.strip()
+    if not text:
+        return jsonify({"error": "No text found in that file."}), 400
+    if len(text) > config.MAX_SCRIPT_CHARS:
+        approx_pages = round(len(text) / 1800)
+        return jsonify(
+            {
+                "error": (
+                    f"Script is too long: {len(text):,} characters "
+                    f"(~{approx_pages} pages). The limit is "
+                    f"{config.MAX_SCRIPT_CHARS:,} characters (~10 pages)."
+                )
+            }
+        ), 413
+    return jsonify({"script": text})
 
 
 @app.post("/api/upload")
@@ -449,8 +487,17 @@ def upload():
     script = ""
     demo = request.args.get("demo") == "1" or bool(body.get("demo"))
 
+    extracted_doc = False  # text pulled from a PDF/Word doc, skips the binary guard
     if "file" in request.files:
-        script = request.files["file"].read().decode("utf-8", errors="replace")
+        up = request.files["file"]
+        raw = up.read()
+        try:
+            script = _extract_text(up.filename or "", raw)
+            extracted_doc = True
+        except _PlainTextFile:
+            script = raw.decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001 — surface a friendly parse error
+            return jsonify({"error": f"Couldn't read that file: {exc}"}), 400
     else:
         script = body.get("script", "") or request.form.get("script", "")
 
@@ -462,10 +509,12 @@ def upload():
     if not script:
         return jsonify({"error": "No script provided"}), 400
 
-    # Guardrail #4 — reject binary files (PDF/docx/images) fed in as "text".
-    err = _looks_binary(script)
-    if err:
-        return jsonify({"error": err}), 400
+    # Guardrail #4 — reject binary files (images, etc.) fed in as "text".
+    # PDFs/Word docs are already parsed to clean text above, so skip the guard.
+    if not extracted_doc:
+        err = _looks_binary(script)
+        if err:
+            return jsonify({"error": err}), 400
 
     # Guardrail #1 — reject oversized documents before they cost tokens.
     if len(script) > config.MAX_SCRIPT_CHARS:
@@ -490,6 +539,53 @@ def upload():
         target=_run_job, args=(job_id, script, demo, opts), daemon=True
     ).start()
     return jsonify({"job_id": job_id})
+
+
+class _PlainTextFile(Exception):
+    """Raised by _extract_text when the upload is plain text, not a document."""
+
+
+def _extract_text(filename: str, raw: bytes) -> str:
+    """Extract plain text from an uploaded PDF / Word / text document.
+
+    Routes by file extension (falling back to content sniffing). For .txt/.md
+    and other plain-text formats, raises _PlainTextFile so the caller decodes
+    it directly. PDF and .docx are parsed into clean text.
+    """
+    name = (filename or "").lower()
+    is_pdf = name.endswith(".pdf") or raw[:5] == b"%PDF-"
+    is_docx = name.endswith(".docx") or raw[:2] == b"PK"  # docx is a zip
+
+    if is_pdf:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(raw))
+        pages = [(page.extract_text() or "") for page in reader.pages]
+        text = "\n\n".join(pages).strip()
+        if not text:
+            raise ValueError(
+                "this PDF has no extractable text (it may be scanned images). "
+                "Paste the script directly or use a text-based PDF."
+            )
+        return text
+
+    if is_docx:
+        from docx import Document
+
+        doc = Document(io.BytesIO(raw))
+        text = "\n".join(p.text for p in doc.paragraphs).strip()
+        if not text:
+            raise ValueError("this Word document appears to be empty.")
+        return text
+
+    if name.endswith(".doc"):
+        raise ValueError(
+            "legacy .doc files aren't supported — save it as .docx, .pdf or "
+            ".txt and upload that, or paste the text directly."
+        )
+
+    # .txt, .md, .fountain, or anything else — let the caller decode as UTF-8.
+    raise _PlainTextFile()
 
 
 def _looks_binary(text: str) -> str | None:
@@ -673,6 +769,7 @@ def download(job_id: str):
             "location",
             "characters",
             "veo_prompt",
+            "visual_review_note",
             "veo_duration_s",
             "azure_broll_path",
         ]
@@ -680,6 +777,11 @@ def download(job_id: str):
     for s in segments:
         azure = s.get("azure_paths") or [s.get("azure_path", "")]
         chars = s.get("characters") or []
+        # Note from the step-6 visual coherence check. If the shot was corrected
+        # we prefix it so the CSV reader can see at a glance which shots changed.
+        note = (s.get("visual_note") or "").strip()
+        if s.get("visual_ok") is False:
+            note = f"[corrected] {note}".strip()
         writer.writerow(
             [
                 s.get("id", ""),
@@ -690,6 +792,7 @@ def download(job_id: str):
                 s.get("location", ""),
                 ", ".join(chars) if isinstance(chars, list) else chars,
                 s.get("veo_prompt", ""),
+                note,
                 s.get("veo_duration", ""),
                 "; ".join(p for p in azure if p),
             ]
