@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>History · Script → B-roll</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="aurora" aria-hidden="true">
+    <span class="blob b1"></span>
+    <span class="blob b2"></span>
+    <span class="blob b3"></span>
+    <div class="grid-overlay"></div>
+  </div>
+
+  <nav class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+      </div>
+      <div class="brand-text">
+        <div class="brand-name">Script<span class="arrow">→</span>B-roll</div>
+        <div class="brand-tag">Run history</div>
+      </div>
+    </div>
+    <div class="chips">
+      <a class="chip" href="/">← Back to studio</a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="hero">
+      <div class="eyebrow">Previous runs</div>
+      <h1>Generation <span class="grad">history</span></h1>
+      <p class="lede">Every run you've generated — reopen its prompts, videos, or CSV.</p>
+    </section>
+    <section id="list"></section>
+    <footer class="foot"><span>Script → B-roll</span></footer>
+  </main>
+
+  <div class="toast" id="toast"></div>
+  <script src="page.js"></script>
+  <script>renderHistory();</script>
+</body>
+</html>
