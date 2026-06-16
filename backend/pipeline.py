@@ -82,6 +82,7 @@ STEP_TITLES = {
     3: "Cinematic style & characters",
     4: "Split into single-shot beats",
     5: "Veo 3.1 prompts",
+    6: "Check visuals against the script",
 }
 
 # What each step needs in its payload when run individually.
@@ -91,6 +92,7 @@ STEP_INPUTS = {
     3: ["script", "concept"],
     4: ["concept", "style", "segments"],
     5: ["style", "segments"],
+    6: ["script", "style", "segments"],
 }
 
 
@@ -145,8 +147,24 @@ def run_pipeline(
 
     emit(5, "start", "Writing Veo 3.1 text-to-video prompts")
     veo = step5_veo(style, segments, gemini)
-    _merge_by_id(segments, veo, ["veo_prompt", "veo_seed", "veo_negative", "veo_duration"])
+    _merge_by_id(segments, veo, ["veo_prompt", "veo_shot_body", "veo_seed", "veo_negative", "veo_duration"])
     emit(5, "done", "Veo prompts ready", {"segments": segments})
+
+    # Step 6: with the whole story in view, confirm each shot's visual actually
+    # makes sense against the script and fix any prompt that drifted.
+    emit(6, "start", "Checking visuals against the script")
+    review = step5b_review(script, style, segments, gemini)
+    _merge_by_id(
+        segments, review,
+        ["veo_prompt", "veo_shot_body", "veo_seed", "visual_ok", "visual_note"],
+    )
+    fixed = sum(1 for r in review if r.get("visual_ok") is False)
+    emit(
+        6, "done",
+        (f"Visuals checked — corrected {fixed} shot(s)" if fixed
+         else "Visuals checked — all consistent with the script"),
+        {"segments": segments},
+    )
 
     result["segments"] = segments
     return result
@@ -163,7 +181,7 @@ def run_step(n: int, payload: dict, gemini: GeminiClient | None = None) -> dict:
     can be merged into a running state object and fed to the next step.
     """
     if n not in STEP_INPUTS:
-        raise ValueError(f"Unknown step {n}. Valid steps are 1-5.")
+        raise ValueError(f"Unknown step {n}. Valid steps are 1-6.")
     _require(payload, STEP_INPUTS[n], n)
     gemini = gemini or GeminiClient()
 
@@ -191,10 +209,21 @@ def run_step(n: int, payload: dict, gemini: GeminiClient | None = None) -> dict:
     if n == 5:
         segments = [dict(s) for s in payload["segments"]]
         veo = step5_veo(payload["style"], segments, gemini)
-        _merge_by_id(segments, veo, ["veo_prompt", "veo_seed", "veo_negative", "veo_duration"])
+        _merge_by_id(segments, veo, ["veo_prompt", "veo_shot_body", "veo_seed", "veo_negative", "veo_duration"])
         return {"segments": segments}
 
-    raise ValueError(f"Unknown step {n}. Valid steps are 1-5.")
+    if n == 6:
+        segments = [dict(s) for s in payload["segments"]]
+        review = step5b_review(
+            payload.get("script", ""), payload["style"], segments, gemini
+        )
+        _merge_by_id(
+            segments, review,
+            ["veo_prompt", "veo_shot_body", "veo_seed", "visual_ok", "visual_note"],
+        )
+        return {"segments": segments}
+
+    raise ValueError(f"Unknown step {n}. Valid steps are 1-6.")
 
 
 # --------------------------------------------------------------------------- #
@@ -539,6 +568,39 @@ SHOTS (with intent / who / where):
     bodies = data["segments"] if isinstance(data, dict) else data
     body_by_id = {b.get("id"): b for b in bodies}
 
+    updates = []
+    for i, s in enumerate(segments, start=1):
+        b = body_by_id.get(s["id"]) or body_by_id.get(i) or {}
+        body = (b.get("shot_body") or b.get("veo_prompt") or "").strip()
+        if not body:
+            body = (s.get("detailed_visual") or s.get("visual") or "").strip()
+
+        veo_prompt, seed = _assemble_veo_prompt(style, s, body)
+        has_people = bool(s.get("characters"))
+        duration = _resolve_duration(b.get("ideal_duration"), has_people)
+        updates.append(
+            {
+                "id": s["id"],
+                "veo_prompt": veo_prompt,
+                "veo_shot_body": body,  # kept so the review step can revise it
+                "veo_seed": seed,
+                "veo_negative": REALISM_NEGATIVE,
+                "veo_duration": duration,
+            }
+        )
+    return updates
+
+
+def _assemble_veo_prompt(style: dict, seg: dict, body: str) -> tuple[str, int | None]:
+    """Build the final 'positive/negative' Veo prompt for one shot.
+
+    Consistency lives in the locked bible blocks, NOT in per-shot wording, so the
+    prompt is always assembled in this fixed order: Look Line -> location block ->
+    character identity block(s) -> the shot body -> the realism close, with the
+    negative stack folded in as a labelled block (the Developer API rejects the
+    separate negative_prompt field). `body` is the only free part; everything
+    else is pasted verbatim from the bible. Returns (veo_prompt, seed).
+    """
     look_line = (style.get("style_prefix") or "").strip()
     char_by_name = {
         (c.get("name") or "").strip().lower(): c for c in style.get("characters", [])
@@ -547,59 +609,131 @@ SHOTS (with intent / who / where):
         (l.get("name") or "").strip().lower(): l for l in style.get("locations", [])
     }
 
+    parts = []
+    if look_line:
+        parts.append(_ensure_period(look_line))
+
+    loc = _lookup_block(seg.get("location") or "", loc_by_name)
+    if loc and loc.get("place_block"):
+        parts.append(_ensure_period(loc["place_block"]))
+
+    seeds = []
+    for name in seg.get("characters", []) or []:
+        c = _lookup_block(name or "", char_by_name)
+        if c and c.get("identity_block"):
+            parts.append(_ensure_period(c["identity_block"]))
+            if c.get("seed") is not None:
+                seeds.append(c["seed"])
+
+    if body:
+        parts.append(_ensure_period(body))
+
+    # ONE short positive close pins the realism baseline + clean plate without
+    # bloating the prompt (Veo dilutes on very long prompts).
+    parts.append(_ensure_period(REALISM_CLOSE))
+
+    positive_text = " ".join(parts).strip()
+    veo_prompt = (
+        f"positive prompt:- {positive_text}\n"
+        f"negative prompt:- {REALISM_NEGATIVE}"
+    )
+    seed = seeds[0] if seeds else (loc.get("seed") if loc else None)
+    return veo_prompt, seed
+
+
+def step5b_review(
+    script: str, style: dict, segments: list[dict], gemini: GeminiClient | None = None
+) -> list[dict]:
+    """Coherence gate between prompt writing (step 5) and video generation.
+
+    With the FULL script in view, judge each shot's visual (its shot body) against
+    the story: does it actually make sense for that moment, faithfully convey the
+    intent, and avoid contradicting or inventing events? If a visual is wrong,
+    misleading, off-story or nonsensical, rewrite ONLY the shot body to fix it,
+    then re-assemble the Veo prompt around the unchanged locked bible blocks. The
+    Look Line, identity blocks and location block are never touched here — only
+    the per-shot action — so consistency is preserved while accuracy improves.
+
+    Returns updates [{id, veo_prompt, veo_shot_body, veo_seed, visual_ok,
+    visual_note}] only for shots that have a prompt; merge them into the segments.
+    """
+    gemini = gemini or GeminiClient()
+    prompted = [s for s in segments if s.get("veo_prompt")]
+    if not prompted:
+        return []
+
+    system = (
+        "You are a continuity and grounding checker for a text-to-video shotlist. "
+        "You have the FULL script, so you understand the whole story. For each "
+        "shot you get its narration/voiceover, its intent, the source visual, and "
+        "the current SHOT BODY — the camera + single action description that will "
+        "actually be filmed. Your job: decide whether that visual genuinely makes "
+        "sense for this moment in the story and is faithful to the script — it "
+        "must not contradict the script, invent events or props that aren't there, "
+        "depict the wrong subject or action, or be physically implausible, and it "
+        "must clearly convey the intended beat. If the shot body is fine, return "
+        "it UNCHANGED and makes_sense=true. If it is wrong, misleading, off-story "
+        "or nonsensical, set makes_sense=false and rewrite ONLY the shot body to "
+        "fix it. Keep the same format: shot grammar (size + lens + camera move Veo "
+        "honors — static, push-in, pull-out, dolly, tracking, pan, tilt, handheld; "
+        "never zoom), ONE simple physically-plausible action in present tense, and "
+        "an 'Audio: ...' line. Refer to characters by name only — do NOT describe "
+        "their looks, the film grade, or location fixtures (those are locked and "
+        "prepended separately, so repeating them only dilutes the prompt). Stay "
+        "strictly grounded in the script; never add anything it does not support."
+    )
+    items = [
+        {
+            "id": s["id"],
+            "voiceover": s.get("voiceover", ""),
+            "intent": s.get("intent", ""),
+            "visual": s.get("visual", ""),
+            "detailed_visual": s.get("detailed_visual", ""),
+            "shot_body": s.get("veo_shot_body", ""),
+        }
+        for s in prompted
+    ]
+    prompt = f"""Check each shot's visual against the whole story and fix it if it
+does not make sense or is not faithful to the script.
+
+For every shot return:
+- id: the shot id, unchanged.
+- makes_sense: true if the current shot_body is a sensible, faithful visual for
+  this moment; false if it is wrong, misleading, off-story or nonsensical.
+- issue: a SHORT note on what was wrong (empty string if makes_sense is true).
+- shot_body: the shot body to use — unchanged when makes_sense is true, or the
+  corrected version when it is false (same format and grounding rules).
+
+Return JSON: {{"segments": [{{"id": 1, "makes_sense": true, "issue": "", "shot_body": "..."}}]}}
+
+FULL SCRIPT (the complete story — judge every shot against this):
+\"\"\"
+{script}
+\"\"\"
+
+SHOTS TO CHECK (in play order):
+{json.dumps(items, ensure_ascii=False, indent=2)}"""
+    data = gemini.generate_json(prompt, system, temperature=0.25)
+    reviews = data["segments"] if isinstance(data, dict) else data
+    review_by_id = {r.get("id"): r for r in (reviews or [])}
+
     updates = []
-    for i, s in enumerate(segments, start=1):
-        b = body_by_id.get(s["id"]) or body_by_id.get(i) or {}
-        body = (b.get("shot_body") or b.get("veo_prompt") or "").strip()
-        if not body:
-            body = (s.get("detailed_visual") or s.get("visual") or "").strip()
+    for i, s in enumerate(prompted, start=1):
+        r = review_by_id.get(s["id"]) or review_by_id.get(i) or {}
+        ok = bool(r.get("makes_sense", True))
+        note = (r.get("issue") or "").strip()
+        new_body = (r.get("shot_body") or "").strip()
+        old_body = (s.get("veo_shot_body") or "").strip()
 
-        parts = []
-        if look_line:
-            parts.append(_ensure_period(look_line))
-
-        loc = _lookup_block(s.get("location") or "", loc_by_name)
-        if loc and loc.get("place_block"):
-            parts.append(_ensure_period(loc["place_block"]))
-
-        seeds = []
-        for name in s.get("characters", []) or []:
-            c = _lookup_block(name or "", char_by_name)
-            if c and c.get("identity_block"):
-                parts.append(_ensure_period(c["identity_block"]))
-                if c.get("seed") is not None:
-                    seeds.append(c["seed"])
-
-        if body:
-            parts.append(_ensure_period(body))
-
-        # ONE short positive close pins the realism baseline + clean plate without
-        # bloating the prompt (Veo dilutes on very long prompts).
-        parts.append(_ensure_period(REALISM_CLOSE))
-
-        # The Gemini Developer API rejects the separate negative_prompt parameter
-        # on Veo, so we fold it into the prompt text using an explicit, labelled
-        # block instead. The shot is delivered as:
-        #     positive prompt:- ...
-        #     negative prompt:- ...
-        positive_text = " ".join(parts).strip()
-        veo_prompt = (
-            f"positive prompt:- {positive_text}\n"
-            f"negative prompt:- {REALISM_NEGATIVE}"
-        )
-
-        seed = seeds[0] if seeds else (loc.get("seed") if loc else None)
-        has_people = bool(s.get("characters"))
-        duration = _resolve_duration(b.get("ideal_duration"), has_people)
-        updates.append(
-            {
-                "id": s["id"],
-                "veo_prompt": veo_prompt,
-                "veo_seed": seed,
-                "veo_negative": REALISM_NEGATIVE,
-                "veo_duration": duration,
-            }
-        )
+        update = {"id": s["id"], "visual_ok": ok, "visual_note": note}
+        # Only re-assemble when the reviewer actually changed the body.
+        if new_body and new_body != old_body:
+            veo_prompt, seed = _assemble_veo_prompt(style, s, new_body)
+            update["veo_prompt"] = veo_prompt
+            update["veo_shot_body"] = new_body
+            update["veo_seed"] = seed
+            update["visual_ok"] = False  # it was corrected
+        updates.append(update)
     return updates
 
 

@@ -3,3 +3,5 @@ flask-cors==4.0.1
 python-dotenv==1.0.1
 google-genai==2.8.0
 azure-storage-blob==12.22.0
+pypdf==5.1.0
+python-docx==1.1.2
