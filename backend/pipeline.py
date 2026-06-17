@@ -79,6 +79,71 @@ FACE_RULE = (
     "literally — never exaggerate, dramatise or pile on adjectives."
 )
 
+# A working director's toolkit, injected into the shot-writing step so camera
+# choices are MOTIVATED by emotion instead of defaulting to a flat eye-level
+# medium every time. Tuned for short-form / microdrama storytelling (the punchy,
+# reaction-driven, mobile-first style of vertical mini-dramas) while staying
+# inside Veo's hard limits: ONE continuous shot per clip, ONE slow motivated
+# move, never a zoom. The goal is expressive coverage, not coverage variety
+# inside a single clip (Veo cannot cut).
+DIRECTION_STYLE = (
+    "DIRECTION STYLE — direct each shot like a short-form / microdrama "
+    "storyteller; every choice of size, angle, lens and move must be MOTIVATED "
+    "by that beat's emotion, never a default. "
+    "SHOT SIZE: wide/establishing to place the world and isolate a figure in it; "
+    "medium for action and relationship; close-up (CU) and extreme close-up "
+    "(ECU) for emotion, decision and reaction — microdrama lives on faces, so "
+    "land the emotional peak of a beat on a tight face or a telling detail "
+    "insert (hands, an object, eyes). "
+    "ANGLE: eye-level reads honest and neutral; a LOW angle gives a subject "
+    "power, threat or heroism; a HIGH angle makes them small, watched or "
+    "defeated; a slight DUTCH/canted tilt signals unease, shock or a world "
+    "knocked off-balance; over-the-shoulder frames confrontation and longing; "
+    "a POV puts us inside the character. "
+    "LENS: a wide lens (≈18-28mm) opens space, isolation and environment but "
+    "distorts faces up close; a normal lens (≈35-50mm) feels natural and human; "
+    "a long lens (≈85mm+) compresses space and isolates the subject for "
+    "intimacy or voyeuristic tension. "
+    "CAMERA MOVE: a move must MEAN something — a slow push-in tightens on a "
+    "growing realization, dread or intimacy; a pull-out reveals context, "
+    "isolation or abandonment; a lateral dolly/track walks WITH a subject for "
+    "momentum; a tilt up gives awe or scale, a tilt down gives discovery or "
+    "defeat; restrained handheld adds nerves and immediacy; a locked-off static "
+    "frame is a strong, confident choice for stillness, control or dread — do "
+    "NOT move the camera unless the emotion earns it. "
+    "DEPTH & BLOCKING: build depth with a foreground element (a 'dirty' frame) "
+    "and place the subject off-centre, in negative space or with leading/"
+    "looking room to create tension or longing. "
+    "RHYTHM: across the whole sequence, VARY the coverage — avoid the same shot "
+    "size or angle on back-to-back shots, and build a progression (e.g. "
+    "establish wider, then tighten toward a close-up on the emotional turn) so "
+    "the cut sequence has visual momentum."
+)
+
+# Aspect-specific framing craft, appended to DIRECTION_STYLE per run.
+DIRECTION_BY_ASPECT = {
+    "9:16": (
+        "VERTICAL FRAMING (9:16, mobile-first microdrama): compose tall — stack "
+        "foreground, subject and background top-to-bottom; favour tighter, "
+        "face-forward framing (MCU/CU) that reads instantly on a small phone "
+        "screen; keep the eyes in the upper third with deliberate headroom; use "
+        "vertical negative space (above or below the subject) for tension."
+    ),
+    "16:9": (
+        "WIDESCREEN FRAMING (16:9): use the horizontal width — place the subject "
+        "on a third with lateral negative space and looking room; let the "
+        "environment breathe across the frame in wides; reserve the full width "
+        "for scale and relationship between subject and place."
+    ),
+}
+
+
+def _direction_for(aspect: str) -> str:
+    """DIRECTION_STYLE plus the framing craft for this aspect ratio."""
+    extra = DIRECTION_BY_ASPECT.get(aspect, DIRECTION_BY_ASPECT["9:16"])
+    return f"{DIRECTION_STYLE} {extra}"
+
+
 STEP_TITLES = {
     1: "Extract voiceover & visuals",
     2: "Understand the concept",
@@ -108,6 +173,7 @@ def run_pipeline(
     emit,
     gemini: GeminiClient | None = None,
     confirm=None,
+    aspect: str = "9:16",
 ) -> dict:
     """Run all five steps with `emit(step, status, message, data=None)` callbacks.
 
@@ -149,7 +215,7 @@ def run_pipeline(
         return result
 
     emit(5, "start", "Writing Veo 3.1 text-to-video prompts")
-    veo = step5_veo(style, segments, gemini)
+    veo = step5_veo(style, segments, gemini, aspect=aspect)
     _merge_by_id(segments, veo, ["veo_prompt", "veo_shot_body", "veo_seed", "veo_negative", "veo_duration"])
     emit(5, "done", "Veo prompts ready", {"segments": segments})
 
@@ -211,7 +277,10 @@ def run_step(n: int, payload: dict, gemini: GeminiClient | None = None) -> dict:
 
     if n == 5:
         segments = [dict(s) for s in payload["segments"]]
-        veo = step5_veo(payload["style"], segments, gemini)
+        veo = step5_veo(
+            payload["style"], segments, gemini,
+            aspect=payload.get("aspect", "9:16"),
+        )
         _merge_by_id(segments, veo, ["veo_prompt", "veo_shot_body", "veo_seed", "veo_negative", "veo_duration"])
         return {"segments": segments}
 
@@ -488,20 +557,29 @@ BEATS TO SPLIT AND EXPAND:
 
 
 def step5_veo(
-    style: dict, segments: list[dict], gemini: GeminiClient | None = None
+    style: dict,
+    segments: list[dict],
+    gemini: GeminiClient | None = None,
+    aspect: str = "9:16",
 ) -> list[dict]:
     """Write the per-shot 'shot body' with the LLM, then ASSEMBLE each prompt
     deterministically: Look Line + location block + character block(s) verbatim
     + the shot body. Consistency lives in the verbatim blocks, not in wording the
     model re-invents per shot. Also attaches the per-shot seed and negatives.
+
+    `aspect` selects the framing craft (vertical microdrama vs widescreen) folded
+    into the direction guidance.
     """
     gemini = gemini or GeminiClient()
     system = (
-        "You are a prompt engineer for Google's Veo 3.1 text-to-video model. "
+        "You are a director and prompt engineer for Google's Veo 3.1 "
+        "text-to-video model. "
         "The film look, the characters' appearance and the locations are ALREADY "
         "locked and will be prepended verbatim — you must NOT re-describe them. "
-        "You write ONLY the shot body: shot grammar (size + lens + camera move), "
-        "ONE primary action, and the audio line. "
+        "You write ONLY the shot body: shot grammar (size + angle + lens + camera "
+        "move), ONE primary action, and the audio line. You DIRECT each shot — "
+        "choosing the size, angle, lens and move that serve the beat's emotion — "
+        "not just transcribe it. "
         "You know Veo's real failure modes and you write to dodge them: it "
         "collapses on more than one action per clip; it morphs hands and fingers "
         "during close fine-finger manipulation; it breaks anatomy and physics on "
@@ -527,17 +605,23 @@ def step5_veo(
         for s in segments
     ]
     prompt = f"""For each shot, read its visual, detailed_visual, intent and
-voiceover to understand what it must convey. Then write ONLY the "shot body" —
-do NOT describe the characters' looks, the film grade, or the location's
-fixtures (those are prepended verbatim for you, so repeating them only dilutes
-the prompt).
+voiceover to understand what it must convey. Then DIRECT and write ONLY the
+"shot body" — do NOT describe the characters' looks, the film grade, or the
+location's fixtures (those are prepended verbatim for you, so repeating them
+only dilutes the prompt).
 
 {GROUNDING_RULE}
 
+{_direction_for(aspect)}
+
 A shot body is ONE tight paragraph, about 35-55 words, in this exact order:
-1. Shot grammar: shot size + lens + camera move, e.g. "Medium close-up on a
-   35mm lens, slow push-in." Use only moves Veo honors (static, slow push-in,
-   pull-out, dolly, tracking, pan, tilt, handheld) — never "zoom".
+1. Shot grammar: shot size + camera angle + lens + camera move, chosen per the
+   DIRECTION STYLE above to serve THIS beat's emotion — e.g. "Low-angle medium
+   close-up on an 85mm lens, slow push-in." Always state the angle (eye-level,
+   low, high, or a slight Dutch tilt) deliberately; a locked-off static frame is
+   a valid, strong choice. Use only moves Veo honors (static, slow push-in,
+   pull-out, dolly, tracking, pan, tilt, handheld) — never "zoom", and only ONE
+   slow move per shot.
 2. ONE primary action, present tense, serving the intent. It must be a SINGLE
    simple, physically plausible human movement (a head turn, one step, a reach,
    a slow exhale) at a natural, unhurried speed. No "then/and then", no second
@@ -546,6 +630,11 @@ A shot body is ONE tight paragraph, about 35-55 words, in this exact order:
    rail") — never re-describe their appearance.
 3. Audio line: "Audio: <ambient bed>, <1-2 SFX anchored to the visible action>;
    no music."
+
+Direct the WHOLE list as one sequence: vary the shot size and angle from one
+shot to the next (never repeat the same framing back-to-back) and build a
+deliberate progression toward each beat's emotional peak, while keeping every
+single move slow and Veo-safe.
 
 Failure-dodging rules:
 - If the action involves close finger work, frame it WIDE or keep the hands

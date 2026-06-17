@@ -179,7 +179,10 @@ def _run_job(job_id: str, script: str, demo: bool = False, opts: dict | None = N
 
     try:
         gemini = make_mock(delay=0.7) if demo else None
-        result = run_pipeline(script, emit, gemini=gemini, confirm=confirm_prompts)
+        result = run_pipeline(
+            script, emit, gemini=gemini, confirm=confirm_prompts,
+            aspect=opts.get("aspect_ratio", config.VEO_ASPECT_RATIO),
+        )
         segments = result["segments"]
         # Persist prompts now so they're viewable even if the user cancels videos.
         job["result"] = result
