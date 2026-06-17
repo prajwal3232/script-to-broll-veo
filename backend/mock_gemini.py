@@ -40,7 +40,7 @@ class MockGemini:
             }
         if "consistency bible" in p or "design the visual identity" in p:
             return {
-                "style_prefix": "Shot on ARRI Alexa with vintage 35mm anamorphic lenses, naturalistic overcast light, a cool desaturated slate-and-teal grade with clean realistic skin, fine 35mm film grain, shallow depth of field, photoreal.",
+                "style_prefix": "Shot on ARRI Alexa with vintage anamorphic lenses, naturalistic overcast light, a cool desaturated slate-and-teal digital grade with clean realistic skin, a fine subtle grain, shallow depth of field, photoreal.",
                 "palette": "Slate grey, pale blue, weak amber",
                 "lighting": "Overcast diffusion with the lighthouse beam as key",
                 "camera": "Slow dolly and locked-off wides, 50mm",

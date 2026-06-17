@@ -36,7 +36,9 @@ REALISM_NEGATIVE = (
     "malformed limbs, extra limbs, mutated anatomy, morphing face, warped face, "
     "identity drift, jerky motion, unnatural movement, sliding feet, floating, "
     "subtitles, captions, text overlay, on-screen text, gibberish text, "
-    "watermark, logo, timecode, glitch, scan lines, light leaks, "
+    "watermark, logo, timecode, film edge code, film edge markings, "
+    "sprocket holes, film perforations, film border, frame counter, "
+    "film leader, glitch, scan lines, light leaks, "
     "low quality, blurry, deformed"
 )
 
@@ -48,8 +50,9 @@ REALISM_NEGATIVE = (
 REALISM_CLOSE = (
     "Photoreal with natural skin texture and visible pores; anatomically correct "
     "hands and limbs that hold their shape, and movement that obeys real-world "
-    "physics with believable weight and balance; a clean plate with no text, "
-    "captions, logos or post effects anywhere in frame"
+    "physics with believable weight and balance; a clean full-frame plate with "
+    "clean edges and no text, captions, logos, film edge markings or sprocket "
+    "holes anywhere in frame"
 )
 
 # Anti-hallucination rule injected into the grounding-sensitive prompts so the
@@ -344,7 +347,7 @@ change clothes.
 
 Return JSON:
 {{
-  "style_prefix": "ONE concrete sentence — the Look Line — naming a real camera/film stock, lens family, color grade, lighting philosophy and film grain, ending with the word photoreal. This exact sentence is pasted at the front of EVERY shot.",
+  "style_prefix": "ONE concrete sentence — the Look Line — naming a real digital cinema camera, lens family, color grade, lighting philosophy and a fine subtle grain, ending with the word photoreal. Describe the grade and grain as a digital look ONLY — do NOT mention physical film stock, celluloid, Kodak/Fuji stock names, film edges, sprocket holes, keykode or edge printing (Veo renders those as gibberish text along the frame border). This exact sentence is pasted at the front of EVERY shot.",
   "palette": "key colors",
   "lighting": "lighting approach",
   "camera": "lens & movement language",
