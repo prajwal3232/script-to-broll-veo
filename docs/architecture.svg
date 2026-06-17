@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/>
+    </marker>
+    <style>
+      .title  { font-size: 22px; font-weight: 800; fill: #0f172a; }
+      .lane    { font-size: 12px; font-weight: 700; fill: #475569; letter-spacing: .08em; }
+      .box     { font-size: 13px; font-weight: 600; fill: #0f172a; }
+      .sub     { font-size: 11px; fill: #475569; }
+      .edge    { stroke: #64748b; stroke-width: 1.6; fill: none; }
+      .edgelbl { font-size: 10.5px; fill: #64748b; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="960" height="760" fill="#f8fafc"/>
+  <text x="32" y="44" class="title">Script &#8594; B-roll &#183; Architecture</text>
+  <text x="32" y="66" class="sub">Script in &#8594; Gemini multi-step pipeline &#8594; Veo 3.1 text-to-video &#8594; CSV + clips + Azure</text>
+
+  <!-- ============ FRONTEND LANE ============ -->
+  <text x="32" y="104" class="lane">FRONTEND &#183; static HTML / JS (served by Flask)</text>
+  <rect x="32" y="116" width="896" height="92" rx="12" fill="#eef2ff" stroke="#c7d2fe"/>
+  <g>
+    <rect x="48" y="132" width="200" height="60" rx="9" fill="#fff" stroke="#a5b4fc"/>
+    <text x="62" y="158" class="box">index.html + app.js</text>
+    <text x="62" y="176" class="sub">paste / upload, settings, run</text>
+  </g>
+  <g>
+    <rect x="262" y="132" width="190" height="60" rx="9" fill="#fff" stroke="#a5b4fc"/>
+    <text x="276" y="158" class="box">prompts.html</text>
+    <text x="276" y="176" class="sub">per-shot Veo prompts</text>
+  </g>
+  <g>
+    <rect x="466" y="132" width="190" height="60" rx="9" fill="#fff" stroke="#a5b4fc"/>
+    <text x="480" y="158" class="box">videos.html</text>
+    <text x="480" y="176" class="sub">rendered clip gallery</text>
+  </g>
+  <g>
+    <rect x="670" y="132" width="242" height="60" rx="9" fill="#fff" stroke="#a5b4fc"/>
+    <text x="684" y="158" class="box">history.html (page.js)</text>
+    <text x="684" y="176" class="sub">past runs</text>
+  </g>
+
+  <!-- arrows frontend <-> backend -->
+  <path class="edge" d="M148 208 L148 250" marker-end="url(#arrow)"/>
+  <text x="156" y="232" class="edgelbl">POST /api/upload</text>
+  <path class="edge" d="M820 250 L820 208" marker-end="url(#arrow)"/>
+  <text x="650" y="232" class="edgelbl">SSE /api/stream &#183; /api/result &#183; /api/download</text>
+
+  <!-- ============ BACKEND LANE ============ -->
+  <text x="32" y="278" class="lane">BACKEND &#183; Flask app (app.py) &#8212; REST + Server-Sent Events</text>
+  <rect x="32" y="290" width="896" height="118" rx="12" fill="#ecfeff" stroke="#a5f3fc"/>
+  <g>
+    <rect x="48" y="306" width="270" height="86" rx="9" fill="#fff" stroke="#67e8f9"/>
+    <text x="62" y="332" class="box">Job orchestrator</text>
+    <text x="62" y="350" class="sub">in-memory JOBS + threads</text>
+    <text x="62" y="366" class="sub">SSE event queue &#8594; browser</text>
+    <text x="62" y="382" class="sub">2 confirm gates (Event waits)</text>
+  </g>
+  <g>
+    <rect x="332" y="306" width="270" height="86" rx="9" fill="#fff" stroke="#67e8f9"/>
+    <text x="346" y="332" class="box">Upload + extract</text>
+    <text x="346" y="350" class="sub">/api/extract, /api/upload</text>
+    <text x="346" y="366" class="sub">pypdf &#183; python-docx &#183; txt</text>
+    <text x="346" y="382" class="sub">size + binary guardrails</text>
+  </g>
+  <g>
+    <rect x="616" y="306" width="296" height="86" rx="9" fill="#fff" stroke="#67e8f9"/>
+    <text x="630" y="332" class="box">History + CSV + retry</text>
+    <text x="630" y="350" class="sub">history.json, result persistence</text>
+    <text x="630" y="366" class="sub">/api/download (full CSV)</text>
+    <text x="630" y="382" class="sub">/api/retry per shot</text>
+  </g>
+
+  <path class="edge" d="M180 408 L180 448" marker-end="url(#arrow)"/>
+  <text x="188" y="432" class="edgelbl">run_pipeline()</text>
+
+  <!-- ============ PIPELINE LANE ============ -->
+  <text x="32" y="476" class="lane">PIPELINE &#183; pipeline.py &#8212; each step is a standalone Gemini call (run_step.py for CLI)</text>
+  <rect x="32" y="488" width="896" height="116" rx="12" fill="#fefce8" stroke="#fde68a"/>
+  <g font-size="11.5">
+    <rect x="46" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="58" y="528" class="box" font-size="12">1 &#183; Extract</text>
+    <text x="58" y="546" class="sub">voiceover +</text>
+    <text x="58" y="560" class="sub">visual beats</text>
+
+    <rect x="172" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="184" y="528" class="box" font-size="12">2 &#183; Concept</text>
+    <text x="184" y="546" class="sub">logline, tone,</text>
+    <text x="184" y="560" class="sub">per-beat intent</text>
+
+    <rect x="298" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="310" y="528" class="box" font-size="12">3 &#183; Style</text>
+    <text x="310" y="546" class="sub">look line +</text>
+    <text x="310" y="560" class="sub">char/loc bible</text>
+
+    <rect x="424" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="436" y="528" class="box" font-size="12">4 &#183; Split</text>
+    <text x="436" y="546" class="sub">single-shot</text>
+    <text x="436" y="560" class="sub">beats</text>
+
+    <rect x="550" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="562" y="528" class="box" font-size="12">5 &#183; Veo</text>
+    <text x="562" y="546" class="sub">assemble t2v</text>
+    <text x="562" y="560" class="sub">prompts</text>
+
+    <rect x="676" y="506" width="118" height="80" rx="8" fill="#fff" stroke="#fcd34d"/>
+    <text x="688" y="528" class="box" font-size="12">6 &#183; Review</text>
+    <text x="688" y="546" class="sub">coherence vs</text>
+    <text x="688" y="560" class="sub">full script</text>
+
+    <rect x="802" y="506" width="112" height="80" rx="8" fill="#fff" stroke="#fca5a5"/>
+    <text x="814" y="528" class="box" font-size="12">7 &#183; Render</text>
+    <text x="814" y="546" class="sub">Veo clips +</text>
+    <text x="814" y="560" class="sub">safety retry</text>
+  </g>
+
+  <!-- gate markers -->
+  <text x="424" y="500" class="edgelbl" fill="#b45309">&#9650; gate 1: approve shots</text>
+  <text x="700" y="500" class="edgelbl" fill="#b45309">&#9650; gate 2: approve videos</text>
+
+  <!-- ============ EXTERNAL LANE ============ -->
+  <text x="32" y="654" class="lane">EXTERNAL SERVICES</text>
+  <g>
+    <rect x="48" y="668" width="270" height="68" rx="9" fill="#f0fdf4" stroke="#86efac"/>
+    <text x="62" y="694" class="box">Gemini API (gemini_client.py)</text>
+    <text x="62" y="712" class="sub">JSON steps 1&#8211;6 &#183; retry + truncation guard</text>
+    <text x="62" y="728" class="sub">mock_gemini.py = no-key demo mode</text>
+  </g>
+  <g>
+    <rect x="332" y="668" width="270" height="68" rx="9" fill="#f0fdf4" stroke="#86efac"/>
+    <text x="346" y="694" class="box">Veo 3.1 (veo.py)</text>
+    <text x="346" y="712" class="sub">text-to-video, 4/6/8s clips</text>
+    <text x="346" y="728" class="sub">model fallback + safety detect</text>
+  </g>
+  <g>
+    <rect x="616" y="668" width="296" height="68" rx="9" fill="#f0fdf4" stroke="#86efac"/>
+    <text x="630" y="694" class="box">Azure Blob (azure_storage.py)</text>
+    <text x="630" y="712" class="sub">optional clip upload via SAS URL</text>
+    <text x="630" y="728" class="sub">disabled when unconfigured</text>
+  </g>
+
+  <!-- pipeline -> external arrows -->
+  <path class="edge" d="M183 604 L183 668" marker-end="url(#arrow)"/>
+  <path class="edge" d="M858 586 L460 668" marker-end="url(#arrow)"/>
+  <path class="edge" d="M870 586 L760 668" marker-end="url(#arrow)"/>
+</svg>

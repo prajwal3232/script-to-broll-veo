@@ -49,7 +49,7 @@ def save_state(path: str, state: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run one pipeline step in isolation.")
-    parser.add_argument("step", type=int, choices=range(1, 6), help="Step number 1-5")
+    parser.add_argument("step", type=int, choices=range(1, 7), help="Step number 1-6")
     parser.add_argument("--state", help="Shared JSON state file (read inputs / write outputs)")
     parser.add_argument("--script", help="Seed the script directly (step 1)")
     parser.add_argument("--script-file", help="Seed the script from a text file (step 1)")
