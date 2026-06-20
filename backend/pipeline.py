@@ -174,6 +174,8 @@ def run_pipeline(
     gemini: GeminiClient | None = None,
     confirm=None,
     aspect: str = "9:16",
+    bible: dict | None = None,
+    char_images: list[dict] | None = None,
 ) -> dict:
     """Run all five steps with `emit(step, status, message, data=None)` callbacks.
 
@@ -198,10 +200,36 @@ def run_pipeline(
     _merge_by_id(segments, concept.get("segments", []), "intent")
     emit(2, "done", "Concept and per-visual intent ready", {"concept": concept})
 
-    emit(3, "start", "Designing cinematic style and characters")
-    style = step3_style(script, concept, gemini)
+    prior = _normalize_bible(bible)
+    if prior:
+        emit(3, "start", "Reusing the locked series bible and adding new characters")
+    else:
+        emit(3, "start", "Designing cinematic style and characters")
+    style = step3_style(script, concept, gemini, prior_bible=bible)
     result["style"] = style
-    emit(3, "done", "Style prefix and character bible ready", {"style": style})
+    if prior:
+        reused = len(prior.get("characters", []))
+        added = max(0, len(style.get("characters", [])) - reused)
+        emit(
+            3, "done",
+            f"Series bible reused — {reused} locked character(s), {added} new",
+            {"style": style},
+        )
+    else:
+        emit(3, "done", "Style prefix and character bible ready", {"style": style})
+
+    # Ground the bible in any uploaded character photos so the text description
+    # matches the face/wardrobe the reference-image ("ingredient") carries.
+    if char_images:
+        emit(3, "start", f"Reading {len(char_images)} character photo(s) for consistency")
+        style = step3b_ground_characters(style, char_images, gemini)
+        grounded = sum(1 for c in style.get("characters", []) if c.get("has_image"))
+        result["style"] = style
+        emit(
+            3, "done",
+            f"Locked {grounded} character(s) to their reference photo",
+            {"style": style},
+        )
 
     emit(4, "start", "Splitting visuals into single-shot beats with full story context")
     detailed = step4_detailed(concept, style, segments, gemini, script=script)
@@ -264,7 +292,12 @@ def run_step(n: int, payload: dict, gemini: GeminiClient | None = None) -> dict:
         return {"concept": concept, "segments": segments}
 
     if n == 3:
-        return {"style": step3_style(payload["script"], payload["concept"], gemini)}
+        return {
+            "style": step3_style(
+                payload["script"], payload["concept"], gemini,
+                prior_bible=payload.get("prior_bible"),
+            )
+        }
 
     if n == 4:
         segments = [dict(s) for s in payload["segments"]]
@@ -382,9 +415,21 @@ VISUALS (by id):
 
 
 def step3_style(
-    script: str, concept: dict, gemini: GeminiClient | None = None
+    script: str,
+    concept: dict,
+    gemini: GeminiClient | None = None,
+    prior_bible: dict | None = None,
 ) -> dict:
+    """Build the TEXT-ONLY consistency bible (Look Line + identity/place blocks).
+
+    If `prior_bible` is given (a bible exported from an earlier episode), its
+    Look Line and every locked character/location is reused VERBATIM so the same
+    people and places carry across episodes. The model is only asked to design
+    blocks for characters/locations that are genuinely NEW in this script; the
+    merge afterwards is deterministic, so locked entries can never be reworded.
+    """
     gemini = gemini or GeminiClient()
+    prior = _normalize_bible(prior_bible)
     system = (
         "You are a cinematographer and character designer building a TEXT-ONLY "
         "consistency bible for Google Veo. Each clip is generated independently "
@@ -392,6 +437,14 @@ def step3_style(
         "are described in IDENTICAL words every time. You write tight, verbatim "
         "blocks that will be pasted unchanged into every prompt."
     )
+    if prior:
+        system += (
+            " This is a later EPISODE of an ongoing series: a locked series "
+            "bible already exists. You MUST reuse its Look Line and every locked "
+            "character/location exactly as given, and only design blocks for "
+            "people or places that are genuinely new in this episode's script."
+        )
+    series_block = _series_prompt_block(prior) if prior else ""
     prompt = f"""Based on the script and its concept, build the consistency bible.
 
 Match the tone "{concept.get('tone', '')}" and genre "{concept.get('genre', '')}".
@@ -402,6 +455,7 @@ words beautiful, stunning, flawless, perfect, cinematic lighting, 8k, hyper-deta
 {GROUNDING_RULE}
 
 {FACE_RULE}
+{series_block}
 
 CONSISTENCY RULE: Each clip is generated with no memory, so a character only
 looks the same across clips if their identity_block fully pins them in IDENTICAL
@@ -456,8 +510,118 @@ SCRIPT:
         style = {}
     style.setdefault("characters", [])
     style.setdefault("locations", [])
+    # Reuse the locked series bible verbatim, appending only genuinely new
+    # characters/locations the model produced for this episode.
+    if prior:
+        style = _merge_bible(prior, style)
     _assign_seeds(style)
     return style
+
+
+def step3b_ground_characters(
+    style: dict,
+    char_images: list[dict],
+    gemini: GeminiClient | None = None,
+) -> dict:
+    """Ground the character bible in the user-uploaded reference photos.
+
+    `char_images` is a list of {"name", "bytes", "mime", "slug"} — one per
+    uploaded image, each tagged with the name the user gave it. For every image
+    we ask Gemini (with the photo in context) to read off the person's real
+    appearance and wardrobe and write an identity_block FROM THE IMAGE, so the
+    text bible matches the face/clothes that the image-to-video reference will
+    actually carry. The result is merged into `style.characters`:
+
+      - if the image's name matches an existing bible character, that character's
+        appearance/wardrobe/identity_block are REPLACED with the image-grounded
+        ones, and it is tagged with `image_slug` + `has_image`;
+      - if no character matches, the person is appended as a NEW bible character
+        (e.g. a protagonist the script names only in passing) so their shots can
+        still use the reference image.
+
+    Characters with a locked reference image keep that image as the single source
+    of truth for their look; the verbatim identity_block still rides along in the
+    prompt to reinforce wardrobe and for any text-only fallback.
+    """
+    if not char_images:
+        return style
+    gemini = gemini or GeminiClient()
+    style.setdefault("characters", [])
+
+    system = (
+        "You are a casting and continuity supervisor. You are shown ONE reference "
+        "photo of a real person who will play a named character in a video, and "
+        "you write a tight, literal, verbatim identity description of EXACTLY what "
+        "you see in the photo — apparent age, skin tone, face shape, hair, build, "
+        "and the clothing they are wearing. You describe only what is visible; you "
+        "never flatter, dramatise, or invent marks the photo does not show. This "
+        "description is pasted unchanged into every shot so the same person and "
+        "clothes recur in every clip."
+    )
+    by_name = {_norm_name(c.get("name", "")): c for c in style["characters"]}
+
+    for img in char_images:
+        name = (img.get("name") or "").strip()
+        data, mime = img.get("bytes"), img.get("mime") or "image/png"
+        if not name or not data:
+            continue
+        prompt = f"""This is the reference photo for the character named "{name}".
+
+Read the person in the photo and return JSON describing ONLY what is visible:
+{{
+  "appearance": "age, build, face, hair — one line, literal, for the UI",
+  "wardrobe": "the clothing visibly worn in the photo — one line, for the UI",
+  "identity_block": "30-45 words, a single verbatim sentence in this order: apparent age, skin tone, face shape, hair (color/length/style), build, then the outfit visibly worn — specific garments, colors and footwear. Plain, ordinary and literal — NOT flattering, NOT exaggerated. Describe ONLY what the photo shows; do not invent scars, moles, tattoos or marks that are not clearly visible. This exact text pins the same person and clothes in every clip."
+}}
+
+{FACE_RULE}"""
+        try:
+            data_out = gemini.generate_json_multimodal(
+                prompt, [(data, mime)], system, temperature=0.2
+            )
+        except Exception:  # noqa: BLE001 — fall back to the text bible on vision failure
+            data_out = {}
+        if not isinstance(data_out, dict):
+            data_out = {}
+
+        appearance = (data_out.get("appearance") or "").strip()
+        wardrobe = (data_out.get("wardrobe") or "").strip()
+        identity = (data_out.get("identity_block") or "").strip()
+
+        match = by_name.get(_norm_name(name)) or _fuzzy_char(name, style["characters"])
+        if match is not None:
+            if appearance:
+                match["appearance"] = appearance
+            if wardrobe:
+                match["wardrobe"] = wardrobe
+            if identity:
+                match["identity_block"] = identity
+            match["image_slug"] = img.get("slug", "")
+            match["has_image"] = True
+        else:
+            new_char = {
+                "name": name,
+                "description": f"{name} (from reference photo)",
+                "appearance": appearance,
+                "wardrobe": wardrobe,
+                "identity_block": identity or (
+                    f"{name}, exactly as shown in the locked reference photo"
+                ),
+                "image_slug": img.get("slug", ""),
+                "has_image": True,
+            }
+            style["characters"].append(new_char)
+            by_name[_norm_name(name)] = new_char
+
+    _assign_seeds(style)
+    return style
+
+
+def _fuzzy_char(name: str, characters: list[dict]) -> dict | None:
+    """Match an uploaded image's name to a bible character, tolerating the wording
+    drift between a user's label ('Maya') and a bible name ('Maya, the runner')."""
+    table = {(c.get("name") or "").strip().lower(): c for c in characters}
+    return _lookup_block(name, table)
 
 
 def step4_detailed(
@@ -1025,6 +1189,93 @@ def _assign_seeds(style: dict) -> None:
         c.setdefault("seed", _seed_for(c.get("name", "")))
     for l in style.get("locations", []) or []:
         l.setdefault("seed", _seed_for("loc:" + l.get("name", "")))
+
+
+# --------------------------------------------------------------------------- #
+# Series bible reuse (cross-episode character/location consistency)
+# --------------------------------------------------------------------------- #
+
+def _norm_name(name: str) -> str:
+    """Normalise a character/location name for matching (case + leading 'the')."""
+    n = (name or "").strip().lower()
+    if n.startswith("the "):
+        n = n[4:]
+    return n
+
+
+def _normalize_bible(bible: dict | None) -> dict | None:
+    """Clean an imported series bible. Returns None if it has nothing reusable.
+
+    Keeps only well-formed entries (a name plus its locked block) so a hand-
+    edited or partial file can't crash the merge.
+    """
+    if not isinstance(bible, dict):
+        return None
+    chars = [
+        c for c in (bible.get("characters") or [])
+        if isinstance(c, dict) and (c.get("name") or "").strip()
+    ]
+    locs = [
+        l for l in (bible.get("locations") or [])
+        if isinstance(l, dict) and (l.get("name") or "").strip()
+    ]
+    style_prefix = (bible.get("style_prefix") or "").strip()
+    if not style_prefix and not chars and not locs:
+        return None
+    return {
+        "style_prefix": style_prefix,
+        "palette": bible.get("palette", ""),
+        "lighting": bible.get("lighting", ""),
+        "camera": bible.get("camera", ""),
+        "characters": chars,
+        "locations": locs,
+    }
+
+
+def _series_prompt_block(prior: dict) -> str:
+    """Render the locked series bible into the step-3 prompt so the model reuses
+    it verbatim and only adds genuinely new entries."""
+    locked = {
+        "characters": [
+            {"name": c.get("name", ""), "identity_block": c.get("identity_block", "")}
+            for c in prior.get("characters", [])
+        ],
+        "locations": [
+            {"name": l.get("name", ""), "place_block": l.get("place_block", "")}
+            for l in prior.get("locations", [])
+        ],
+    }
+    return f"""
+SERIES BIBLE — ALREADY LOCKED (this is a later episode of the same series).
+Reuse ALL of this VERBATIM and do NOT reword any of it:
+- Use this EXACT sentence as "style_prefix" (the series Look Line): "{prior.get('style_prefix', '')}"
+- Return every locked character below UNCHANGED (same name, same identity_block),
+  and every locked location UNCHANGED (same name, same place_block).
+- Then ADD only the characters/locations that appear in THIS episode's script and
+  are NOT already locked here. New entries follow the same rules as the locked ones.
+
+LOCKED ENTRIES:
+{json.dumps(locked, ensure_ascii=False, indent=2)}
+"""
+
+
+def _merge_bible(prior: dict, fresh: dict) -> dict:
+    """Combine a locked series bible with the model's fresh output deterministic-
+    ally: locked entries win verbatim (so they can never be reworded), the series
+    Look Line is always the locked one, and only unseen names from `fresh` are
+    appended."""
+    merged = dict(fresh)
+    if prior.get("style_prefix"):
+        merged["style_prefix"] = prior["style_prefix"]
+    for key in ("characters", "locations"):
+        locked = [dict(e) for e in prior.get(key, [])]
+        seen = {_norm_name(e.get("name", "")) for e in locked}
+        for e in fresh.get(key, []) or []:
+            if _norm_name(e.get("name", "")) not in seen:
+                locked.append(e)
+                seen.add(_norm_name(e.get("name", "")))
+        merged[key] = locked
+    return merged
 
 
 def _ensure_period(text: str) -> str:

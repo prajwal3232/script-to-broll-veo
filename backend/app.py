@@ -145,7 +145,14 @@ def _new_job(meta: dict | None = None) -> str:
     return job_id
 
 
-def _run_job(job_id: str, script: str, demo: bool = False, opts: dict | None = None) -> None:
+def _run_job(
+    job_id: str,
+    script: str,
+    demo: bool = False,
+    opts: dict | None = None,
+    bible: dict | None = None,
+    char_images: list[dict] | None = None,
+) -> None:
     job = JOBS[job_id]
     q: queue.Queue = job["events"]
     opts = opts or {}
@@ -182,6 +189,7 @@ def _run_job(job_id: str, script: str, demo: bool = False, opts: dict | None = N
         result = run_pipeline(
             script, emit, gemini=gemini, confirm=confirm_prompts,
             aspect=opts.get("aspect_ratio", config.VEO_ASPECT_RATIO),
+            bible=bible, char_images=char_images,
         )
         segments = result["segments"]
         # Persist prompts now so they're viewable even if the user cancels videos.
@@ -235,7 +243,8 @@ def _run_job(job_id: str, script: str, demo: bool = False, opts: dict | None = N
 
         job["status"] = "running"
         _history_patch(job_id, status="running")
-        _generate_broll(job_id, segments, demo, emit, opts, max_shots)
+        char_ref = _char_ref(job_id, result)
+        _generate_broll(job_id, segments, demo, emit, opts, max_shots, char_ref)
         job["status"] = "done"
         _persist_result(job_id, result)
         rendered = sum(1 for s in segments if s.get("videos") or s.get("video_demo"))
@@ -252,7 +261,8 @@ def _run_job(job_id: str, script: str, demo: bool = False, opts: dict | None = N
 
 
 def _generate_broll(
-    job_id: str, segments: list, demo: bool, emit, opts: dict, max_shots: int | None = None
+    job_id: str, segments: list, demo: bool, emit, opts: dict,
+    max_shots: int | None = None, char_ref: dict | None = None,
 ) -> None:
     """Step 6: render Veo video(s) per shot and (optionally) upload to Azure.
 
@@ -296,7 +306,8 @@ def _generate_broll(
         with ThreadPoolExecutor(max_workers=batch) as pool:
             futures = [
                 pool.submit(
-                    _render_one_shot, job_id, i, seg, total, demo, aspect, model, count, emit
+                    _render_one_shot, job_id, i, seg, total, demo, aspect,
+                    model, count, emit, char_ref,
                 )
                 for i, seg in wave
             ]
@@ -308,14 +319,16 @@ def _generate_broll(
     # Every shot has now been attempted at least once. Hand the shots that Veo
     # blocked on content-safety grounds to the prompt-sanitizer for up to 2
     # rewrite-and-retry passes each; non-safety failures are left as-is.
-    _retry_safety_blocked(job_id, to_render, total, demo, aspect, model, count, emit)
+    _retry_safety_blocked(
+        job_id, to_render, total, demo, aspect, model, count, emit, char_ref
+    )
 
     emit(7, "done", "B-roll videos ready", {"segments": segments})
 
 
 def _retry_safety_blocked(
     job_id: str, to_render: list, total: int, demo: bool, aspect: str,
-    model: str, count: int, emit,
+    model: str, count: int, emit, char_ref: dict | None = None,
 ) -> None:
     """Rewrite-and-retry pass for shots Veo rejected for content safety.
 
@@ -369,7 +382,9 @@ def _retry_safety_blocked(
                 break
             seg["veo_prompt"] = current
             seg.pop("video_error", None)
-            _render_one_shot(job_id, i, seg, total, demo, aspect, model, count, emit)
+            _render_one_shot(
+                job_id, i, seg, total, demo, aspect, model, count, emit, char_ref
+            )
             if seg.get("videos"):
                 seg["safety_rewritten"] = True
                 emit(
@@ -392,23 +407,30 @@ def _retry_safety_blocked(
 
 def _render_one_shot(
     job_id: str, i: int, seg: dict, total: int, demo: bool, aspect: str,
-    model: str, count: int, emit,
+    model: str, count: int, emit, char_ref: dict | None = None,
 ) -> None:
     """Render (and upload) a single shot. Never raises — failures are recorded
     on the segment so one bad shot doesn't sink the whole wave."""
     sid = seg.get("id", i)
     prompt = seg.get("veo_prompt", "")
+    refs = _reference_images_for(seg, char_ref or {})
+    seg["reference_chars"] = [
+        n for n in (seg.get("characters") or [])
+        if _norm_char(n) in (char_ref or {})
+    ]
     try:
         if demo:
             time.sleep(0.8)
             seg["video_demo"] = True
             seg["video_count"] = count
             seg["azure_path"] = ""
-            emit(7, "progress", f"Shot {i}/{total} rendered (demo)")
+            note = f" with {len(refs)} character ref(s)" if refs else ""
+            emit(7, "progress", f"Shot {i}/{total} rendered (demo){note}")
             return
         if not prompt:
             return
-        emit(7, "progress", f"Rendering shot {i}/{total} with Veo…")
+        ref_note = f" + {len(refs)} character photo(s)" if refs else ""
+        emit(7, "progress", f"Rendering shot {i}/{total} with Veo{ref_note}…")
         out_path = os.path.join(config.GENERATED_DIR, f"{job_id}_{sid}.mp4")
         paths = veo.generate_video(
             prompt,
@@ -421,6 +443,7 @@ def _render_one_shot(
             # so we no longer pass it here.
             seed=seg.get("veo_seed"),
             duration_seconds=seg.get("veo_duration") or None,
+            reference_images=refs or None,
             on_status=lambda m, i=i: emit(7, "progress", f"Shot {i}/{total}: {m}"),
         )
         videos = []
@@ -486,9 +509,14 @@ def extract():
 
 @app.post("/api/upload")
 def upload():
-    body = request.json if request.is_json else {}
+    # The body can arrive as JSON (no images) or multipart form (with character
+    # photos). Merge both into one dict so the rest of the handler is uniform.
+    body = dict(request.json) if request.is_json else {}
+    for k in ("script", "model", "aspect_ratio", "number_of_videos", "bible", "demo"):
+        if k not in body and k in request.form:
+            body[k] = request.form.get(k)
     script = ""
-    demo = request.args.get("demo") == "1" or bool(body.get("demo"))
+    demo = request.args.get("demo") == "1" or _truthy(body.get("demo"))
 
     extracted_doc = False  # text pulled from a PDF/Word doc, skips the binary guard
     if "file" in request.files:
@@ -535,13 +563,203 @@ def upload():
 
     opts = _video_opts(body)
 
+    # Optional reusable series bible (for cross-episode character consistency).
+    bible, bible_err = _parse_bible(body.get("bible"))
+    if bible_err:
+        return jsonify({"error": bible_err}), 400
+
+    # Optional character reference photos (ingredient-to-video). Each uploaded
+    # image is tagged with the character name it depicts.
+    try:
+        char_images = _parse_char_images()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     job_id = _new_job(
-        {"title": _script_title(script), "demo": demo, "opts": opts}
+        {
+            "title": _script_title(script),
+            "demo": demo,
+            "opts": opts,
+            "bible_reused": bool(bible),
+            "char_count": len(char_images),
+        }
     )
+    # Persist the photos under the job dir so generation (and per-shot retries)
+    # can re-attach them as Veo reference images later.
+    char_images = _store_char_images(job_id, char_images)
+
     threading.Thread(
-        target=_run_job, args=(job_id, script, demo, opts), daemon=True
+        target=_run_job,
+        args=(job_id, script, demo, opts, bible, char_images),
+        daemon=True,
     ).start()
     return jsonify({"job_id": job_id})
+
+
+def _truthy(v) -> bool:
+    """Coerce a JSON bool or a form string ('1','true','on') to a bool."""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_char_images() -> list[dict]:
+    """Read uploaded character photos + their names from a multipart request.
+
+    Returns a list of {"name", "slug", "bytes", "mime"} (no disk writes yet).
+    The frontend sends one file field `char_images` per photo and a parallel
+    `char_names` form field per photo, in the same order. Raises ValueError on a
+    bad upload (too many, too big, wrong type, missing name) so the caller can
+    return a 400.
+    """
+    files = request.files.getlist("char_images")
+    if not files:
+        return []
+    names = request.form.getlist("char_names")
+    if len(files) > config.MAX_CHAR_IMAGES:
+        raise ValueError(
+            f"Too many character photos ({len(files)}). "
+            f"The limit is {config.MAX_CHAR_IMAGES}."
+        )
+    out: list[dict] = []
+    seen_slugs: set[str] = set()
+    for i, up in enumerate(files):
+        name = (names[i] if i < len(names) else "").strip()
+        if not name:
+            raise ValueError("Every character photo needs a character name.")
+        raw = up.read()
+        if not raw:
+            continue
+        if len(raw) > config.MAX_CHAR_IMAGE_BYTES:
+            mb = config.MAX_CHAR_IMAGE_BYTES // (1024 * 1024)
+            raise ValueError(f"'{name}' photo is too large (limit {mb} MB).")
+        mime = (up.mimetype or "").lower()
+        if mime not in config.CHAR_IMAGE_MIMES:
+            raise ValueError(
+                f"'{name}' photo must be a PNG, JPEG or WebP image."
+            )
+        slug = _unique_slug(name, i, seen_slugs)
+        out.append({"name": name, "slug": slug, "bytes": raw, "mime": mime})
+    return out
+
+
+def _unique_slug(name: str, index: int, seen: set[str]) -> str:
+    base = "".join(c if c.isalnum() else "-" for c in name.lower()).strip("-")
+    base = base or f"char{index + 1}"
+    slug = base
+    n = 2
+    while slug in seen:
+        slug = f"{base}-{n}"
+        n += 1
+    seen.add(slug)
+    return slug
+
+
+def _char_dir(job_id: str) -> str:
+    return os.path.join(config.GENERATED_DIR, job_id, "chars")
+
+
+def _store_char_images(job_id: str, char_images: list[dict]) -> list[dict]:
+    """Write each parsed photo to the job's char dir and record a manifest.
+
+    Adds `filename` and `path` to each entry and writes a manifest.json keyed by
+    slug so a later per-shot retry (which has no request body) can rebuild the
+    name -> file mapping. Keeps the in-memory `bytes` for the immediate pipeline
+    run (the vision grounding step needs them right away).
+    """
+    if not char_images:
+        return []
+    cdir = _char_dir(job_id)
+    os.makedirs(cdir, exist_ok=True)
+    manifest = {}
+    for img in char_images:
+        ext = config.CHAR_IMAGE_MIMES.get(img["mime"], ".png")
+        filename = f"{img['slug']}{ext}"
+        path = os.path.join(cdir, filename)
+        with open(path, "wb") as f:
+            f.write(img["bytes"])
+        img["filename"] = filename
+        img["path"] = path
+        manifest[img["slug"]] = {
+            "name": img["name"], "filename": filename, "mime": img["mime"],
+        }
+    with open(os.path.join(cdir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    return char_images
+
+
+def _norm_char(name: str) -> str:
+    n = (name or "").strip().lower()
+    return n[4:] if n.startswith("the ") else n
+
+
+def _char_ref(job_id: str, result: dict | None) -> dict:
+    """Build {normalized character name -> {"path", "mime"}} for a finished run.
+
+    Reads the on-disk photo manifest and the run's grounded style bible (which
+    tags each photo-backed character with its `image_slug`). Works from disk
+    alone, so it serves both the main render and a later single-shot retry.
+    """
+    cdir = _char_dir(job_id)
+    try:
+        with open(os.path.join(cdir, "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    style = (result or {}).get("style") or {}
+    ref: dict[str, dict] = {}
+    for c in style.get("characters", []):
+        slug = c.get("image_slug")
+        if slug and slug in manifest:
+            entry = manifest[slug]
+            ref[_norm_char(c.get("name", ""))] = {
+                "path": os.path.join(cdir, entry["filename"]),
+                "mime": entry.get("mime", "image/png"),
+            }
+    return ref
+
+
+def _reference_images_for(seg: dict, char_ref: dict) -> list[tuple[bytes, str]]:
+    """Load the (bytes, mime) reference photos for the characters in one shot."""
+    if not char_ref:
+        return []
+    out: list[tuple[bytes, str]] = []
+    for name in seg.get("characters") or []:
+        entry = char_ref.get(_norm_char(name))
+        if not entry:
+            continue
+        try:
+            with open(entry["path"], "rb") as f:
+                out.append((f.read(), entry["mime"]))
+        except OSError:
+            continue
+    return out
+
+
+def _parse_bible(raw) -> tuple[dict | None, str | None]:
+    """Validate an imported series bible from the upload body.
+
+    Accepts a dict or a JSON string. Returns (bible, error). A missing/blank
+    value is fine (returns (None, None)); a value that is present but isn't a
+    usable bible returns an error so the user notices it didn't load.
+    """
+    if raw in (None, "", {}):
+        return None, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None, "The character bible file isn't valid JSON."
+    if not isinstance(raw, dict):
+        return None, "The character bible must be a JSON object."
+    has_chars = isinstance(raw.get("characters"), list) and raw.get("characters")
+    has_locs = isinstance(raw.get("locations"), list) and raw.get("locations")
+    if not raw.get("style_prefix") and not has_chars and not has_locs:
+        return None, (
+            "That file doesn't look like a character bible "
+            "(no style_prefix, characters or locations)."
+        )
+    return raw, None
 
 
 class _PlainTextFile(Exception):
@@ -736,11 +954,13 @@ def retry_shot(job_id: str, shot_id: str):
     seg["video_retrying"] = True
     _persist_result(job_id, result)  # so disk-backed polls see the retry state
 
+    char_ref = _char_ref(job_id, result)
+
     def _work():
         try:
             _render_one_shot(
                 job_id, seg.get("id", shot_id), seg, 1, demo,
-                aspect, model, count, lambda *a, **k: None,
+                aspect, model, count, lambda *a, **k: None, char_ref,
             )
         finally:
             seg.pop("video_retrying", None)
@@ -806,6 +1026,34 @@ def download(job_id: str):
         mimetype="text/csv",
         headers={
             "Content-Disposition": f"attachment; filename=script_to_broll_{job_id[:8]}.csv"
+        },
+    )
+
+
+@app.get("/api/bible/<job_id>")
+def export_bible(job_id: str):
+    """Export this run's locked consistency bible as JSON, so it can be reused
+    as the series bible for the next episode (cross-episode character lock)."""
+    job = JOBS.get(job_id)
+    result = job["result"] if job and job["result"] else _load_result(job_id)
+    if not result or not result.get("style"):
+        return jsonify({"error": "No bible for this job yet"}), 404
+
+    style = result["style"]
+    bible = {
+        "series_bible": True,
+        "style_prefix": style.get("style_prefix", ""),
+        "palette": style.get("palette", ""),
+        "lighting": style.get("lighting", ""),
+        "camera": style.get("camera", ""),
+        "characters": style.get("characters", []),
+        "locations": style.get("locations", []),
+    }
+    return Response(
+        json.dumps(bible, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename=series_bible_{job_id[:8]}.json"
         },
     )
 
@@ -885,6 +1133,12 @@ def video_status(job_id: str):
 @app.get("/api/video/file/<path:filename>")
 def video_file(filename: str):
     return send_from_directory(config.GENERATED_DIR, filename)
+
+
+@app.get("/api/charimage/<job_id>/<path:filename>")
+def char_image_file(job_id: str, filename: str):
+    """Serve an uploaded character reference photo (for the UI thumbnails)."""
+    return send_from_directory(_char_dir(job_id), filename)
 
 
 @app.get("/api/steps")

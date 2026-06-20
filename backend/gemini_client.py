@@ -52,6 +52,43 @@ class GeminiClient:
         text = (response.text or "").strip()
         return _parse_json(text)
 
+    def generate_json_multimodal(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        system: str | None = None,
+        temperature: float | None = None,
+    ) -> dict | list:
+        """Like generate_json, but with one or more images supplied as context.
+
+        `images` is a list of (raw_bytes, mime_type) tuples. They are sent as
+        inline image parts before the text prompt so the model can describe a
+        provided character photo (used to ground the consistency bible in the
+        actual uploaded face/wardrobe instead of inventing one).
+        """
+        config_kwargs = {
+            "response_mime_type": "application/json",
+            "max_output_tokens": config.GEMINI_MAX_OUTPUT_TOKENS,
+        }
+        if system:
+            config_kwargs["system_instruction"] = system
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+
+        parts = [
+            types.Part.from_bytes(data=data, mime_type=mime)
+            for (data, mime) in images
+            if data
+        ]
+        parts.append(types.Part.from_text(text=prompt))
+        contents = [types.Content(role="user", parts=parts)]
+
+        cfg = types.GenerateContentConfig(**config_kwargs)
+        response = self._generate_with_retry(contents, cfg)
+        _check_truncated(response)
+        text = (response.text or "").strip()
+        return _parse_json(text)
+
     def _generate_with_retry(self, prompt, cfg):
         """Call Gemini, retrying transient server-side errors with backoff.
 

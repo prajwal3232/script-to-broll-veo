@@ -24,6 +24,7 @@ def generate_video(
     negative_prompt: str | None = None,
     seed: int | None = None,
     duration_seconds: int | None = None,
+    reference_images: list[tuple[bytes, str]] | None = None,
     on_status=None,
     poll_interval: int = 10,
     timeout: int = 600,
@@ -32,6 +33,12 @@ def generate_video(
 
     With `number_of_videos > 1` the first clip is saved at `out_path` and the
     rest get a `_2`, `_3`, … suffix before the extension.
+
+    `reference_images` is an optional list of (raw_bytes, mime_type) character
+    photos passed to Veo as ASSET reference images ("ingredient-to-video"), so
+    the named characters keep the same face/wardrobe across clips. This is a
+    Veo 3.1 feature; if the chosen model rejects it the call raises (we never
+    silently drop the character reference — the caller asked for it on purpose).
     `on_status(message)` is an optional callback for progress text.
     """
     if not config.GEMINI_API_KEY:
@@ -59,6 +66,18 @@ def generate_video(
     # (plain API key) rejects it outright, so gate it behind config.VEO_USE_SEED.
     if seed is not None and config.VEO_USE_SEED:
         cfg_kwargs["seed"] = seed
+    # Character "ingredient" photos -> Veo ASSET reference images. Kept verbatim;
+    # never dropped by the fallback (see _PROTECTED_FIELDS) so a model that can't
+    # honor them fails loudly instead of quietly generating a stranger.
+    if reference_images:
+        cfg_kwargs["reference_images"] = [
+            types.VideoGenerationReferenceImage(
+                image=types.Image(image_bytes=data, mime_type=mime or "image/png"),
+                reference_type=types.VideoGenerationReferenceType.ASSET,
+            )
+            for (data, mime) in reference_images
+            if data
+        ]
 
     status(f"Submitting to {model}…")
     operation = _submit_with_fallback(client, model, prompt, cfg_kwargs, status)
@@ -104,7 +123,10 @@ _OPTIONAL_FIELDS = {
     "numberofvideos": "number_of_videos",
 }
 # Required fields we must never strip even if they appear in an error message.
-_PROTECTED_FIELDS = {"aspect_ratio", "number_of_videos"}
+# `reference_images` is protected on purpose: the user uploaded a character photo
+# to lock that character, so if the model can't honor it we surface the error
+# rather than silently generating a different-looking person.
+_PROTECTED_FIELDS = {"aspect_ratio", "number_of_videos", "reference_images"}
 
 
 def _submit_with_fallback(client, model, prompt, cfg_kwargs, status):
@@ -125,6 +147,15 @@ def _submit_with_fallback(client, model, prompt, cfg_kwargs, status):
             )
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
+            # A model that can't do ingredient-to-video should fail with a clear,
+            # actionable message instead of a raw INVALID_ARGUMENT.
+            if "reference_images" in cfg_kwargs and _rejects_reference_images(msg):
+                raise RuntimeError(
+                    f"{model} does not support character reference images "
+                    "(ingredient-to-video). Switch to a Veo 3.1 Fast or Quality "
+                    "model to use uploaded character photos, or remove the photos "
+                    f"to render from the text bible only. Original error: {msg}"
+                ) from exc
             dropped = _drop_unsupported_field(cfg_kwargs, msg)
             if dropped and field_attempts < len(_OPTIONAL_FIELDS):
                 field_attempts += 1
@@ -137,6 +168,16 @@ def _submit_with_fallback(client, model, prompt, cfg_kwargs, status):
                 time.sleep(wait)
                 continue
             raise
+
+
+def _rejects_reference_images(message: str) -> bool:
+    """True if a Veo error is the model refusing the reference_images field."""
+    low = message.lower()
+    if "reference" not in low and "reference_image" not in low:
+        return False
+    signals = ("invalid_argument", "not supported", "isn't supported",
+               "only supported", "unsupported", "is not supported", "400")
+    return any(s in low for s in signals)
 
 
 def _is_transient(message: str) -> bool:

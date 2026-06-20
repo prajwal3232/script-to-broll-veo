@@ -18,10 +18,13 @@ function emptyState(msg) {
   return `<div class="page-empty">${esc(msg)}</div>`;
 }
 
-function promptMeta(s) {
+function promptMeta(s, imageChars) {
   const chips = [];
   if (s.location) chips.push(`<span class="meta-chip loc">📍 ${esc(s.location)}</span>`);
-  (s.characters || []).forEach((c) => chips.push(`<span class="meta-chip char">${esc(c)}</span>`));
+  (s.characters || []).forEach((c) => {
+    const ref = imageChars && imageChars.has(normName(c)) ? " 📷" : "";
+    chips.push(`<span class="meta-chip char">${esc(c)}${ref}</span>`);
+  });
   if (s.veo_duration) chips.push(`<span class="meta-chip dur">⏱ ${esc(s.veo_duration)}s</span>`);
   if (s.veo_seed != null) chips.push(`<span class="meta-chip seed">seed ${esc(s.veo_seed)}</span>`);
   if (!chips.length) return "";
@@ -39,6 +42,12 @@ async function renderPrompts() {
     return;
   }
   const segments = result.segments || [];
+  // Characters that were locked to an uploaded reference photo (image-backed).
+  const imageChars = new Set(
+    ((result.style || {}).characters || [])
+      .filter((c) => c.has_image || c.image_slug)
+      .map((c) => normName(c.name))
+  );
   list.innerHTML = segments
     .map(
       (s) => `
@@ -49,7 +58,7 @@ async function renderPrompts() {
         <div class="spacer"></div>
         <button class="ghost-btn sm copy-btn" data-text="${escAttr(s.veo_prompt || "")}">Copy</button>
       </div>
-      ${promptMeta(s)}
+      ${promptMeta(s, imageChars)}
       <pre class="prompt-body">${esc(s.veo_prompt || "—")}</pre>
     </div>`
     )
@@ -278,4 +287,8 @@ function esc(s) {
 }
 function escAttr(s) {
   return esc(s).replace(/"/g, "&quot;");
+}
+function normName(s) {
+  const n = String(s || "").trim().toLowerCase();
+  return n.startsWith("the ") ? n.slice(4) : n;
 }

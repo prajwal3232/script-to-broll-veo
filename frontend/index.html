@@ -85,6 +85,20 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
           <select id="modelSelect" class="model-select"></select>
         </div>
       </div>
+      <div class="char-block">
+        <div class="char-head">
+          <div>
+            <span class="setting-label">Character reference photos</span>
+            <span class="muted char-sub">Optional · keeps a character's face &amp; outfit consistent (Veo 3.1 ingredient-to-video)</span>
+          </div>
+          <label class="ghost-btn sm">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14m-7-7h14"/></svg>
+            Add photo
+            <input type="file" id="charInput" accept="image/png,image/jpeg,image/webp" multiple hidden />
+          </label>
+        </div>
+        <div class="char-list" id="charList"></div>
+      </div>
       <div class="input-actions">
         <label class="ghost-btn">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4m0 0L7 9m5-5l5 5M4 20h16"/></svg>
@@ -92,6 +106,13 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
           <input type="file" id="file" accept=".txt,.md,.fountain,.pdf,.docx" hidden />
         </label>
         <span class="filename muted" id="filename"></span>
+        <label class="ghost-btn" title="Reuse a character bible exported from an earlier episode, so the same characters and look carry across episodes">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM19 17H6"/></svg>
+          Reuse bible
+          <input type="file" id="bibleFile" accept=".json,application/json" hidden />
+        </label>
+        <span class="filename muted" id="bibleName"></span>
+        <button id="clearBible" class="link-btn" hidden title="Stop reusing the bible">clear</button>
         <div class="spacer"></div>
         <button id="demo" class="ghost-btn" title="Preview the whole UI with sample data — no API key needed">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M10 8l5 4-5 4z" fill="currentColor" stroke="none"/></svg>
@@ -129,7 +150,7 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
         </div>
         <div class="tl-step" data-step="5">
           <div class="tl-rail"><div class="tl-dot"><span class="num">5</span></div></div>
-          <div class="tl-body"><div class="tl-title">Veo 3.1 prompts</div><div class="tl-msg">Write a text-to-video prompt per shot with consistent style and characters.</div></div>
+          <div class="tl-body"><div class="tl-title">Veo 3.1 prompts</div><div class="tl-msg">Write a prompt per shot with consistent style and characters, locking any uploaded character photo to its bible entry.</div></div>
         </div>
         <div class="tl-step" data-step="6">
           <div class="tl-rail"><div class="tl-dot"><span class="num">6</span></div></div>
@@ -137,7 +158,7 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
         </div>
         <div class="tl-step" data-step="7">
           <div class="tl-rail"><div class="tl-dot"><span class="num">7</span></div></div>
-          <div class="tl-body"><div class="tl-title">Generate B-roll videos</div><div class="tl-msg">Render a Veo 3.1 clip per shot and upload to Azure when configured.</div></div>
+          <div class="tl-body"><div class="tl-title">Generate B-roll videos</div><div class="tl-msg">Render a Veo 3.1 clip per shot — passing each character's photo as a reference ingredient — and upload to Azure when configured.</div></div>
         </div>
       </div>
     </section>
@@ -154,7 +175,7 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
       <div class="results-card">
         <div class="results-headline">
           <h2>Your B-roll is ready</h2>
-          <p>Open the prompts, preview the rendered videos, or export everything as a CSV.</p>
+          <p>Open the prompts, preview the rendered videos, export a CSV, or save the character bible to reuse in the next episode.</p>
         </div>
         <div class="results-actions">
           <button id="viewPrompts" class="action-btn">
@@ -168,6 +189,10 @@ VO: Some nights, the silence is the loudest thing of all."></textarea>
           <button id="download" class="action-btn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg>
             <span>Download CSV</span>
+          </button>
+          <button id="saveBible" class="action-btn" title="Download this run's locked character + look bible to reuse in the next episode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM19 17H6"/></svg>
+            <span>Save bible</span>
           </button>
         </div>
       </div>

@@ -6,6 +6,9 @@ let lastResult = null;
 let isDemo = false;
 let confirmStage = "videos"; // which gate the modal is currently asking about
 let veoOpts = { aspect_ratio: "9:16", number_of_videos: 1, model: null };
+let importedBible = null; // reusable series bible for cross-episode consistency
+let charItems = []; // [{id, file, name, url}] uploaded character reference photos
+let charSeq = 0;
 
 const AVATAR_COLORS = [
   "linear-gradient(135deg,#818cf8,#38bdf8)",
@@ -31,6 +34,12 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#viewVideos").addEventListener("click", () => {
     if (currentJob) window.open(`/videos?job=${currentJob}`, "_blank");
   });
+  $("#saveBible").addEventListener("click", () => {
+    if (currentJob) window.location = `/api/bible/${currentJob}`;
+  });
+  $("#bibleFile").addEventListener("change", (e) => loadBible(e.target.files[0]));
+  $("#clearBible").addEventListener("click", clearBible);
+  $("#charInput").addEventListener("change", (e) => addCharFiles(e.target.files));
   setupSegment("#aspectSeg", "aspect", (v) => (veoOpts.aspect_ratio = v));
   setupSegment("#countSeg", "count", (v) => (veoOpts.number_of_videos = +v));
   $("#modelSelect").addEventListener("change", (e) => (veoOpts.model = e.target.value));
@@ -171,6 +180,101 @@ function loadFile(file) {
   reader.readAsText(file);
 }
 
+/* -------- Series bible (cross-episode character consistency) -------- */
+function loadBible(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const bible = JSON.parse(reader.result);
+      const chars = Array.isArray(bible.characters) ? bible.characters.length : 0;
+      const locs = Array.isArray(bible.locations) ? bible.locations.length : 0;
+      if (!bible.style_prefix && !chars && !locs) {
+        throw new Error("not a character bible");
+      }
+      importedBible = bible;
+      $("#bibleName").textContent = `${file.name} · ${chars} character${chars === 1 ? "" : "s"}`;
+      $("#clearBible").hidden = false;
+      toast(`Reusing bible — ${chars} locked character${chars === 1 ? "" : "s"}.`);
+    } catch (err) {
+      clearBible();
+      toast("That doesn't look like a character bible JSON file.", true);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function clearBible() {
+  importedBible = null;
+  $("#bibleFile").value = "";
+  $("#bibleName").textContent = "";
+  $("#clearBible").hidden = true;
+}
+
+/* -------- Character reference photos (ingredient-to-video) -------- */
+const MAX_CHARS = 6;
+const MAX_CHAR_MB = 8;
+
+function addCharFiles(fileList) {
+  const files = Array.from(fileList || []);
+  for (const file of files) {
+    if (charItems.length >= MAX_CHARS) {
+      toast(`Up to ${MAX_CHARS} character photos.`, true);
+      break;
+    }
+    if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
+      toast(`${file.name}: use a PNG, JPEG or WebP image.`, true);
+      continue;
+    }
+    if (file.size > MAX_CHAR_MB * 1024 * 1024) {
+      toast(`${file.name} is over ${MAX_CHAR_MB} MB.`, true);
+      continue;
+    }
+    const name = file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
+    charItems.push({ id: ++charSeq, file, name, url: URL.createObjectURL(file) });
+  }
+  $("#charInput").value = "";
+  renderCharList();
+}
+
+function removeChar(id) {
+  const it = charItems.find((c) => c.id === id);
+  if (it) URL.revokeObjectURL(it.url);
+  charItems = charItems.filter((c) => c.id !== id);
+  renderCharList();
+}
+
+function renderCharList() {
+  const list = $("#charList");
+  if (!charItems.length) {
+    list.innerHTML = "";
+    list.classList.remove("has-items");
+    return;
+  }
+  list.classList.add("has-items");
+  list.innerHTML = charItems
+    .map(
+      (c) => `
+    <div class="char-item" data-id="${c.id}">
+      <img class="char-thumb" src="${c.url}" alt="" />
+      <input class="char-name" type="text" placeholder="Character name" value="${escAttr(c.name)}" data-id="${c.id}" />
+      <button class="char-remove" data-id="${c.id}" title="Remove" aria-label="Remove">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>`
+    )
+    .join("");
+  list.querySelectorAll(".char-name").forEach((inp) =>
+    inp.addEventListener("input", (e) => {
+      const it = charItems.find((c) => c.id === +e.target.dataset.id);
+      if (it) it.name = e.target.value;
+    })
+  );
+  list.querySelectorAll(".char-remove").forEach((btn) =>
+    btn.addEventListener("click", () => removeChar(+btn.dataset.id))
+  );
+}
+
 async function extractDoc(file) {
   $("#filename").textContent = `Reading ${file.name}…`;
   try {
@@ -215,6 +319,11 @@ async function run(demo = false) {
   const script = $("#script").value.trim();
   if (!script && !demo) return toast("Paste or upload a script first.", true);
 
+  const chars = charItems.filter((c) => c.file);
+  if (chars.some((c) => !c.name.trim())) {
+    return toast("Give every character photo a name.", true);
+  }
+
   isDemo = demo;
   resetUI();
   const btn = $("#run");
@@ -226,11 +335,30 @@ async function run(demo = false) {
   $("#progressPanel").classList.add("reveal");
 
   try {
-    const r = await fetch(`/api/upload${demo ? "?demo=1" : ""}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ script, demo, ...veoOpts }),
-    });
+    let opts;
+    if (chars.length) {
+      // Multipart: photos can't ride in a JSON body. Names go in a parallel
+      // char_names field, in the same order as the char_images files.
+      const fd = new FormData();
+      fd.append("script", script);
+      if (demo) fd.append("demo", "1");
+      fd.append("model", veoOpts.model || "");
+      fd.append("aspect_ratio", veoOpts.aspect_ratio);
+      fd.append("number_of_videos", String(veoOpts.number_of_videos));
+      if (importedBible) fd.append("bible", JSON.stringify(importedBible));
+      for (const c of chars) {
+        fd.append("char_images", c.file, c.file.name);
+        fd.append("char_names", c.name.trim());
+      }
+      opts = { method: "POST", body: fd };
+    } else {
+      opts = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script, demo, ...veoOpts, bible: importedBible }),
+      };
+    }
+    const r = await fetch(`/api/upload${demo ? "?demo=1" : ""}`, opts);
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Upload failed");
     currentJob = data.job_id;

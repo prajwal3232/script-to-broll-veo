@@ -12,6 +12,22 @@ class MockGemini:
     def __init__(self, delay: float = 0.0):
         self.delay = delay
 
+    def generate_json_multimodal(
+        self, prompt: str, images, system: str | None = None, temperature=None
+    ):
+        """Canned image-grounding response for demo mode (no real vision call)."""
+        if self.delay:
+            time.sleep(self.delay)
+        return {
+            "appearance": "30s, medium build, oval face, short dark hair",
+            "wardrobe": "charcoal crew-neck tee and dark jeans",
+            "identity_block": (
+                "a person in their early thirties with medium-tan skin, an oval "
+                "face, short dark hair and a medium build, wearing a charcoal "
+                "crew-neck tee, dark slim jeans and white sneakers"
+            ),
+        }
+
     def generate_json(self, prompt: str, system: str | None = None, temperature=None):
         if self.delay:
             time.sleep(self.delay)

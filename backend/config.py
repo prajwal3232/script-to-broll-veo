@@ -52,6 +52,17 @@ VEO_MAX_VIDEOS_PER_RUN = int(os.getenv("VEO_MAX_VIDEOS_PER_RUN", "50"))
 # hundreds of shots, so reject anything over this size or that isn't plain text.
 MAX_SCRIPT_CHARS = int(os.getenv("MAX_SCRIPT_CHARS", "20000"))
 
+# Character reference photos (for ingredient-to-video). Cap the count and per-file
+# size so a careless upload can't balloon memory or the Veo request payload.
+MAX_CHAR_IMAGES = int(os.getenv("MAX_CHAR_IMAGES", "6"))
+MAX_CHAR_IMAGE_BYTES = int(os.getenv("MAX_CHAR_IMAGE_BYTES", str(8 * 1024 * 1024)))
+CHAR_IMAGE_MIMES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+}
+
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "5000"))
 
